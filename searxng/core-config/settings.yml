@@ -1,0 +1,40 @@
+# SearXNG settings — AI-search 自建实例
+# 关键点：开启 json 输出格式（mcp-searxng 需要）；limiter 关闭（服务只监听 127.0.0.1）
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "AI-search SearXNG"
+  enable_metrics: false
+  donation_url: false
+  contact_url: false
+  privacypolicy_url: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "auto"
+  formats:
+    - html
+    - json
+
+server:
+  base_url: "http://127.0.0.1:47311/"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "GET"
+  http_protocol_version: "1.0"
+
+ui:
+  static_use_hash: true
+  default_locale: "zh-Hans-CN"
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 12.0
+  pool_connections: 100
+  pool_maxsize: 20
+  enable_http2: true
+
+# 引擎集合先使用默认值；待容器跑通后按“实测可用”结果裁剪（见 Pipeline-design.md 第 6 节）

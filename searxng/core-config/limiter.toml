@@ -1,0 +1,3 @@
+# limiter 已关闭（server.limiter: false），此文件保留以兼容镜像默认路径
+[botdetection.ip_limit]
+link_token = false

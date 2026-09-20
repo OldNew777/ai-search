@@ -1,0 +1,35 @@
+{
+  "ports": {
+    "searxng": 47311,
+    "daemon": 47313,
+    "container": 8080
+  },
+  "container": {
+    "name": "ai-search-searxng",
+    "image": "docker.io/searxng/searxng:latest"
+  },
+  "idle": {
+    "minutes": 15
+  },
+  "paths": {
+    "searxngConfig": "searxng/core-config",
+    "openWebSearch": "open-websearch",
+    "scraplingVenv": "scrapling/.venv",
+    "fallbackSearch": "fallback-search",
+    "fallbackVenv": "fallback-search/.venv",
+    "mcpSearxng": "mcp-searxng",
+    "envFile": ".env",
+    "logs": "logs"
+  },
+  "upstream": {
+    "openWebSearchRepo": "https://github.com/Aas-ee/open-webSearch.git",
+    "openWebSearchRef": "main",
+    "mcpSearxngNpm": "mcp-searxng",
+    "scraplingSpec": "scrapling[ai]",
+    "pythonVersion": "3.12"
+  },
+  "skillLinks": {
+    "codex": ".codex/skills/ai-search",
+    "claude": ".claude/skills/ai-search"
+  }
+}

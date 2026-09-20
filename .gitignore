@@ -1,0 +1,27 @@
+# ---- secrets & machine state (never commit) ----
+.env
+_backup/
+logs/
+
+# ---- virtual envs / interpreters ----
+**/.venv/
+**/venv/
+__pycache__/
+*.py[cod]
+
+# ---- third-party code restored by `bootstrap` ----
+open-websearch/
+mcp-searxng/
+
+# ---- runtime / build artifacts ----
+node_modules/
+build/
+dist/
+*.log
+searxng/data/
+searxng/redis-data/
+
+# ---- OS junk ----
+.DS_Store
+Thumbs.db
+desktop.ini

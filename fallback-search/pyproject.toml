@@ -1,0 +1,20 @@
+[project]
+name = "fallback-search"
+version = "1.0.0"
+description = "Deterministic fallback search MCP gateway: open-webSearch -> Firecrawl(keyless) -> DuckDuckGo"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=2.0.0,<3.0.0",
+    "httpx>=0.27",
+    "ddgs>=9.0.0",
+]
+
+[project.scripts]
+fallback-search = "fallback_search.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fallback_search"]
