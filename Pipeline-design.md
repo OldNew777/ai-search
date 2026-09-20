@@ -411,3 +411,50 @@ Codex (Windows)
 | 通过 `~/.claude/skills/ai-search/.../status.ps1` 调用 | ✅ 同上 |
 | `config.toml` TOML 解析 | ✅ 10 个 MCP server，6 个 AI-search 服务器路径正确 |
 | 计划任务 | ✅ 动作已指向 `<data-root>\skills\ai-search\scripts\idle-stop.ps1` |
+
+---
+
+## 17. Python 化 + 开源发布（2026-09-20 23:00）
+
+### 17.1 停止语义（明确区分两种）
+
+| 场景 | 入口 | 谁可以触发 |
+|---|---|---|
+| **立即停止**（同步，不检查空闲） | `ai_search.py stop [--all]` | **仅当用户明文要求**（"关闭搜索服务"/"stop it now"）；模型**不得**自行调用 |
+| 空闲回收（先检查空闲时长） | `ai_search.py idle-check --minutes N` | OS 计划任务，每 15 分钟；模型不得调用，也不得绕过 |
+
+该契约写入 SKILL.md 的 Golden rules、`~/.codex/AGENTS.md`、`~/.claude/CLAUDE.md`（全英文、无硬编码路径，只提示"去 skills 目录找 ai-search 技能"）。
+
+### 17.2 全量 Python 重写（跨平台）
+
+- 单一入口 `skills/ai-search/scripts/ai_search.py`（**仅用标准库**，Python 3.9+，Windows/macOS/Linux 通用）。
+- 命令：`start / stop / idle-check / status / verify / install-idle-task / uninstall-idle-task / sync-agent-config / link-skill / bootstrap / repair / rollback`。
+- 计划任务：Windows `schtasks`（调用 `pythonw.exe` 避免黑框）、macOS `launchd`、Linux `crontab`。
+- 技能链接：Windows 用 junction（`mklink /J`），POSIX 用 `os.symlink`。
+- 配置由 `config/settings.json` 统一管理（替代 PowerShell 的 `.psd1`），脚本**零硬编码路径**。
+- 原 `scripts/*.ps1` 已全部删除。
+
+### 17.3 平台差异处理
+
+| 事项 | Windows | macOS / Linux |
+|---|---|---|
+| 容器端口可达性 | WSL 端口发布在 Windows 侧不可用 → **SSH 隧道直连容器 IP** | 原生 podman 直接用发布端口（隧道失败时自动回退） |
+| known_hosts | `UserKnownHostsFile=NUL` | `/dev/null` |
+| 后台进程 | `DETACHED_PROCESS + CREATE_NO_WINDOW` | `start_new_session=True` |
+| 定时任务 | schtasks | launchd / cron |
+
+### 17.4 开源发布
+
+- 远端：`https://github.com/OldNew777/ai-search.git`（分支 `master`）。
+- `.gitignore` 排除：`.env`、`_backup/`、`logs/`、所有 venv、`node_modules/`、`open-websearch/`、`mcp-searxng/`（后两者由 `bootstrap` 重建）。
+- 已提交 14 个文件（技能、网关源码、SearXNG 配置、文档、探针）；**不含**任何密钥、venv、镜像或备份。
+- 首次推送完成：`bf4abb6..a7ab6d1 master -> master`。
+
+### 17.5 新机器开箱即用
+
+```bash
+git clone https://github.com/OldNew777/ai-search.git && cd ai-search
+python skills/ai-search/scripts/ai_search.py bootstrap
+```
+
+`bootstrap` 依序：建 venv 装 Scrapling(+Chromium) → 装 fallback 网关（editable）→ clone/build open-websearch → 装 mcp-searxng → 生成 `.env` → 建立 Codex/Claude 技能链接 → 写 `config.toml`/`AGENTS.md`/`CLAUDE.md` → 装空闲回收任务 → 启动并真实检索验证。全流程幂等，可重复执行。

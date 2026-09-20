@@ -812,7 +812,9 @@ def _need(cmd: str) -> bool:
 
 def cmd_bootstrap(args) -> int:
     print(f"bootstrapping AI-search at {DATA_ROOT}")
-    missing = [c for c in ("git", "node", "npm", "podman") if _need(c)]
+    missing = [c for c in ("git", "node", "npm") if _need(c)]
+    if not find_podman():
+        missing.append("podman (Podman Desktop or the podman CLI)")
     if missing:
         print(f"! missing tools: {', '.join(missing)} - install them first")
         return 1
