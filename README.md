@@ -70,6 +70,7 @@ python skills/ai-search/scripts/ai_search.py bootstrap
 python skills/ai-search/scripts/ai_search.py start     # 启动（幂等，可自动调用）
 python skills/ai-search/scripts/ai_search.py status    # 端口 / 健康 / 隧道 / 容器
 python skills/ai-search/scripts/ai_search.py verify    # 启动 + 真实检索自检
+python skills/ai-search/scripts/ai_search.py heal      # 启动 + 容器出网自检/自愈（引擎连不出去时重启 podman machine）
 python skills/ai-search/scripts/ai_search.py stop      # 立即停止（仅限用户明确要求；加 --all 连 VM 一起停）
 ```
 
@@ -130,6 +131,7 @@ python skills/ai-search/scripts/ai_search.py link-skill             # 重建 Cod
 python skills/ai-search/scripts/ai_search.py install-idle-task --minutes 30
 python skills/ai-search/scripts/ai_search.py uninstall-idle-task    # 完全手动停止（禁用空闲回收）
 python skills/ai-search/scripts/ai_search.py rollback               # 还原最近一次备份的 Agent 配置
+python skills/ai-search/scripts/ai_search.py heal                    # 容器出网自检 + 自愈（安全闸：机器上有其他容器在跑则只报告不重启）
 ```
 
 ---
@@ -140,7 +142,8 @@ python skills/ai-search/scripts/ai_search.py rollback               # 还原最�
 |---|---|
 | `searxng` MCP 连接失败 | `start` 然后 `status`（隧道或容器未运行） |
 | podman machine 未启动 | `start` 会自动拉起；冷启动约 20–40 秒 |
-| 检索 0 结果 | 部分上游引擎在本网络不可达；改用 `fallback_search` 并说明降级 |
+| 检索 0 结果（上游引擎全部超时） | 容器多半丢了出网能力（宿主休眠/恢复后 WSL usernet 掉线）：先跑 `verify`（会自愈并真实检索一次）；仍为 0 则看 `status` 的 `--- egress ---` 段，改用 `fallback_search` 并说明降级 |
+| `start` 打印 `[DEGRADED]` | SearXNG 活着但引擎连不出去：直接走 `fallback_search`，不要再重试 SearXNG |
 | 结果偏旧 | 检索时传 `time_range`（`day`/`week`/…）或换更精确的查询 |
 | 迁移目录后失效 | `repair`，然后重启 Agent |
 | 想看接口是否活着 | `python skills/ai-search/scripts/ai_search.py verify` |
@@ -152,6 +155,7 @@ python skills/ai-search/scripts/ai_search.py rollback               # 还原最�
 - 当前网络下 `duckduckgo`、`wikidata` 两个上游引擎不响应（其余引擎正常，不影响检索）。
 - Podman machine 常驻约占 2 GB 内存；空闲回收任务（或 `stop --all`）可释放。
 - Windows 必须依赖 SSH 隧道（WSL 端口发布限制），因此需要 OpenSSH 客户端。
+- podman machine 的 user-mode networking（usernet）在宿主休眠/恢复后可能掉线，表现为容器无 DNS/无路由、所有引擎超时、检索 0 结果；`start`/`heal` 会自检并自愈（若该机器上还有其他容器在运行，则只报告不重启）。
 
 ## 第三方组件
 

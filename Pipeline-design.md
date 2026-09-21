@@ -179,7 +179,25 @@ Scrapling 用 `enabled_tools` 裁到 9 个常用工具以降上下文；`open_we
 | 定时任务 | `schtasks`（用 `pythonw.exe`，无黑框） | `launchd`（LaunchAgents plist） | `crontab` |
 | 技能链接 | junction | symlink | symlink |
 
-命令面：`start / stop / idle-check / status / verify / install-idle-task / uninstall-idle-task / sync-agent-config / link-skill / bootstrap / repair / rollback`。
+命令面：`start / stop / idle-check / status / verify / heal / install-idle-task / uninstall-idle-task / sync-agent-config / link-skill / bootstrap / repair / rollback`。
+
+### 11.1 容器出网自检与自愈（2026-09-21 修复）
+
+**现象**：`start` 打印 `[OK] SearXNG is ready`，但每次检索都是 0 条结果，`unresponsive_engines` 里所有上游引擎均为“超时”
+（2026-09-21「查询今日杭州天气」会话即此症状，Agent 只能降级到 `fallback_search` 才拿到数据）。
+
+**根因**：`searxng_ready()` 只验证“宿主隧道 → 容器 HTTP 端口”是否应答，无法反映**容器自身的出网能力**。
+当时 podman machine（WSL 后端）的 user-mode networking 掉线：容器 `/etc/resolv.conf` 指向失效的 gvproxy 网关 `192.168.127.1`，
+机器路由表缺少 `default`（`podman-usermode` 接口不在），容器内连 IP 都 `Network is unreachable`——SearXNG 活着，检索能力为零。
+
+**修复**（`skills/ai-search/scripts/ai_search.py`）：
+
+1. `container_egress()`：`podman exec` 进容器执行标准库探针（解析 + 443 TCP 连接 `www.bing.com`/`www.baidu.com`），给出容器视角的 OK/FAIL/UNKNOWN；
+2. `check_egress()`：`start` 在服务就绪后默认执行探针，失败打印 `[WARN]`→`[DEGRADED]` 并明确指向 `fallback_search`，不再“假装就绪”；
+3. `heal_network()`：探针失败时自动 `machine stop` → `machine start` 并重建容器 + SSH 隧道；**安全闸**：该机器上若还有其他 running 容器则只报告、不重启；
+4. `verify` 遇到 0 结果改为 `[FAIL]` + 返回码 1；`status` 新增 `--- egress ---` 段；新增 `heal` 命令；`start` 支持 `--quick`（跳过探针）与 `--no-heal`（只报告不重启 VM）。
+
+**实测**（2026-09-21）：坏状态探针 FAIL(`no-dns`) → 自愈重启机器（约 35 s）→ 探针 OK → `verify` 返回 30 条结果。
 
 ---
 
@@ -189,6 +207,7 @@ Scrapling 用 `enabled_tools` 裁到 9 个常用工具以降上下文；`open_we
 python skills/ai-search/scripts/ai_search.py start            # 启动（幂等，Agent 可自动调用）
 python skills/ai-search/scripts/ai_search.py status           # 端口/健康/隧道/容器
 python skills/ai-search/scripts/ai_search.py verify           # 启动 + 真实检索
+python skills/ai-search/scripts/ai_search.py heal             # 启动 + 容器出网自检/自愈（必要时重启 podman machine）
 python skills/ai-search/scripts/ai_search.py stop [--all]     # 立即停止（仅用户明确要求）
 python skills/ai-search/scripts/ai_search.py idle-check --minutes 15
 python skills/ai-search/scripts/ai_search.py install-idle-task --minutes 15
@@ -209,6 +228,7 @@ python skills/ai-search/scripts/ai_search.py rollback         # 还原最近备�
 | 技能发现 | Codex `YES`；Claude Code `YES` |
 | 通过两个链接调用脚本 | ✅ 均正确解析到 `<data-root>` |
 | `verify`（真实检索） | ✅ SearXNG 返回 38–46 条结果 |
+| 容器出网自检/自愈（2026-09-21 补测） | ✅ 坏状态探针 FAIL(`no-dns`) → 自愈重启机器（约 35 s）→ 探针 OK → `verify` 30 条结果 |
 | 生命周期 | ✅ `stop` → 端口 0 监听 → `start` → 容器 IP 变化（.7→.8）后隧道重建成功 |
 | 计划任务 | ✅ `LastTaskResult = 0`，动作为 `pythonw.exe ... ai_search.py idle-check` |
 | 新机器克隆 | ✅ 克隆体积 ~96 KB，脚本在新位置正确定位 data-root |
@@ -229,6 +249,7 @@ python skills/ai-search/scripts/ai_search.py rollback         # 还原最近备�
 | 脚本形态 | 先 PowerShell → 因跨平台与可维护性**全部重写为 Python 单文件**（仅标准库） |
 | 编码教训 | PowerShell 5.1 需 UTF-8 **带 BOM**；`config.toml`/`AGENTS.md` 必须**无 BOM**（TOML 规范）——同一约定保留在 Python 版：`.ps1` 已删除，写入 TOML/Markdown 一律无 BOM |
 | 发布 | 代码托管 GitHub；venv/镜像/备份/密钥全部 gitignore，第三方件由 `bootstrap` 还原 |
+| 2026-09-21 | 修复“服务已就绪但检索 0 结果”：`start` 默认探测**容器内**出网（DNS + 443 TCP），失败即自愈（重启 podman machine + 重建隧道），`verify`/`status` 如实报告；只检查 HTTP 的 `searxng_ready()` 是本次误判根因 |
 
 ---
 
@@ -238,7 +259,8 @@ python skills/ai-search/scripts/ai_search.py rollback         # 还原最近备�
 
 - 当前网络下 `duckduckgo`、`wikidata` 上游引擎无响应（其余引擎正常）；
 - Windows 必须依赖 SSH 隧道（WSL 限制），因此需要 OpenSSH 客户端；
-- podman machine 常驻约占 2 GB 内存。
+- podman machine 常驻约占 2 GB 内存；
+- usernet（user-mode networking）在宿主休眠/恢复后可能掉线：容器无 DNS/无路由 → 所有引擎超时、检索 0 结果。已由 `start`/`heal` 自检自愈覆盖（机器上有其他容器时只报告不重启）。
 
 **可选项**
 

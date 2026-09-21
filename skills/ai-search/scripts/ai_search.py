@@ -77,12 +77,15 @@ def log_dir() -> Path:
 
 # --------------------------------------------------------------------------- helpers
 
-def run(cmd, check=False, cwd=None, timeout=300, env=None):
-    """Run a command, returning (returncode, stdout, stderr)."""
+def run(cmd, check=False, cwd=None, timeout=300, env=None, stdin_data=None):
+    """Run a command, returning (returncode, stdout, stderr).
+
+    stdin_data (str) is fed to the process on stdin - used by the egress probe.
+    """
     try:
         proc = subprocess.run(
             cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True,
-            timeout=timeout, env=env, errors="replace",
+            timeout=timeout, env=env, errors="replace", input=stdin_data,
         )
     except FileNotFoundError as exc:
         return 127, "", str(exc)
@@ -273,6 +276,156 @@ def container_ip(podman: str) -> str:
     return out.strip()
 
 
+# --------------------------------------------------------------------------- network preflight
+
+# The probe below runs *inside* the container on purpose: the SearXNG web app can answer on
+# 127.0.0.1 while the engines behind it have no DNS and no route out (this is what happens on
+# Windows when the WSL-based podman machine loses its user-mode networking). Only a probe from
+# inside the container tells the truth about whether searching can actually work.
+EGRESS_PROBE = """\
+import socket
+
+hosts = ("www.bing.com", "www.baidu.com")
+resolved, connected, errors = [], [], []
+for host in hosts:
+    try:
+        socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+        resolved.append(host)
+    except Exception as exc:
+        errors.append("dns:%s:%s" % (host, type(exc).__name__))
+        continue
+    try:
+        socket.create_connection((host, 443), 4).close()
+        connected.append(host)
+    except Exception as exc:
+        errors.append("tcp:%s:%s" % (host, type(exc).__name__))
+
+if connected:
+    print("PROBE=OK connected=%s resolved=%s" % (",".join(connected), ",".join(resolved)))
+elif resolved:
+    print("PROBE=FAIL no-tcp resolved=%s errors=%s" % (",".join(resolved), ";".join(errors)))
+else:
+    print("PROBE=FAIL no-dns errors=%s" % ";".join(errors))
+"""
+
+
+def container_egress(podman: str, timeout: int = 60):
+    """Probe DNS + TCP egress from inside the container.
+
+    (True, detail)  - the container resolves names and reaches the internet
+    (False, detail) - it demonstrably cannot (all engines will return nothing)
+    (None, detail)  - undecidable (no podman/container/python)
+    """
+    if not podman:
+        return None, "podman not found"
+    if not container_running(podman):
+        return None, "container is not running"
+    last = "no python interpreter inside the container image"
+    for interpreter in ("python", "python3"):
+        rc, out, err = run([podman, "exec", "-i", CONTAINER["name"], interpreter, "-"],
+                           timeout=timeout, stdin_data=EGRESS_PROBE)
+        lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip().startswith("PROBE=")]
+        if lines:
+            return lines[-1].startswith("PROBE=OK"), lines[-1].replace("PROBE=", "", 1)
+        blob = f"{err or ''}\n{out or ''}".lower()
+        if "executable file" in blob or "no such file" in blob or "not found" in blob:
+            continue
+        text = (err or out or f"probe failed (rc={rc})").strip()
+        if text:
+            last = text.splitlines()[-1][:200]
+        break
+    return None, last
+
+
+def foreign_running_containers(podman: str):
+    """Running containers other than ours - None when the list cannot be read."""
+    rc, out, _ = podman_capture(podman, "ps", "--format", "{{.Names}}", timeout=60)
+    if rc != 0:
+        return None
+    return [n.strip() for n in out.splitlines() if n.strip() and n.strip() != CONTAINER["name"]]
+
+
+def heal_network(podman: str) -> bool:
+    """Restart the podman machine to restore container egress, then rebuild container + tunnel.
+
+    Safety gate: if any other container is running on that machine the machine is left alone,
+    so a repair can never disturb unrelated workloads.
+    """
+    if not podman:
+        return False
+    others = foreign_running_containers(podman)
+    if others is None:
+        print("  ! cannot list the containers - not restarting the podman machine on my own")
+        return False
+    if others:
+        print(f"  ! other containers are running ({', '.join(others)}) - "
+              "not restarting the podman machine")
+        return False
+    name = machine_name(podman)
+    print(f"  restarting podman machine '{name}' (container egress is gone) ...")
+    rc, out, err = podman_capture(podman, "machine", "stop", timeout=600)
+    if rc != 0:
+        print(f"  machine stop returned {rc}: {(err or out).strip()[:160]}")
+    rc, out, err = podman_capture(podman, "machine", "start", timeout=900)
+    if rc != 0:
+        print(f"  ! machine start failed: {(err or out).strip()[:240]}")
+        return False
+    for _ in range(24):
+        if machine_running(podman):
+            break
+        time.sleep(5)
+    else:
+        print("  ! the machine did not come back")
+        return False
+    try:
+        cip = ensure_container(podman)
+    except Exception as exc:
+        print(f"  ! the container did not come back: {exc}")
+        return False
+    if not start_tunnel(podman, cip):
+        print("  ! the tunnel did not come back")
+        return False
+    for _ in range(20):
+        if searxng_ready():
+            return True
+        time.sleep(3)
+    print("  ! SearXNG did not answer after the machine restart")
+    return False
+
+
+def check_egress(podman: str, heal: bool = True):
+    """Preflight the container's outbound network, repairing it once when it is broken.
+
+    True  - engines can reach the internet
+    False - they cannot: use the fallback chain and tell the user
+    None  - could not be determined (do not draw conclusions)
+    """
+    ok, detail = container_egress(podman)
+    if ok is False:
+        # a machine that has just been started can need a few seconds for route + DNS
+        time.sleep(5)
+        ok, detail = container_egress(podman)
+    if ok:
+        print(f"[OK] container egress: {detail}")
+        return True
+    if ok is None:
+        print(f"[INFO] container egress unknown: {detail}")
+        return None
+    print(f"[WARN] SearXNG has no outbound network - {detail}")
+    if heal and heal_network(podman):
+        ok, detail = container_egress(podman)
+        if ok:
+            print(f"[OK] container egress restored: {detail}")
+            return True
+        print(f"[WARN] the container still has no outbound network - {detail}")
+    print("[DEGRADED] SearXNG is up but its engines cannot reach the network: use fallback_search "
+          "and tell the user the primary path is down.")
+    return False
+
+
+
+
+
 def ensure_container(podman: str) -> str:
     secret = ensure_secret()
     publish = f"127.0.0.1:{PORTS['searxng']}:{PORTS['container']}"
@@ -381,49 +534,60 @@ def start_tunnel(podman: str, cip: str) -> bool:
 
 def cmd_start(args) -> int:
     touch_marker()
+    with_daemon = bool(getattr(args, "with_daemon", False))
+    quick = bool(getattr(args, "quick", False))
+    auto_heal = not bool(getattr(args, "no_heal", False))
+    podman = find_podman()
+
     if searxng_ready():
         print(f"[SearXNG] already ready on 127.0.0.1:{PORTS['searxng']}")
-        if getattr(args, "with_daemon", False):
-            start_daemon()
-        return 0
-
-    podman = find_podman()
-    if not podman:
-        print("! podman not found - install Podman Desktop (with the Podman and Compose extensions)")
-        return 1
-
-    if not machine_running(podman):
-        print("[1/4] starting the podman machine ...")
-        rc, out, err = run([podman, "machine", "start"], timeout=900)
-        for _ in range(24):
-            if machine_running(podman):
-                break
-            time.sleep(5)
-        else:
-            print(f"! machine did not start: {(err or out).strip()[:300]}")
+    else:
+        if not podman:
+            print("! podman not found - install Podman Desktop (with the Podman and Compose extensions)")
             return 1
 
-    print("[2/4] ensuring the SearXNG container ...")
-    cip = ensure_container(podman)
-    print(f"  container ip = {cip}")
+        if not machine_running(podman):
+            print("[1/4] starting the podman machine ...")
+            rc, out, err = run([podman, "machine", "start"], timeout=900)
+            for _ in range(24):
+                if machine_running(podman):
+                    break
+                time.sleep(5)
+            else:
+                print(f"! machine did not start: {(err or out).strip()[:300]}")
+                return 1
 
-    print(f"[3/4] opening the SSH tunnel 127.0.0.1:{PORTS['searxng']} -> {cip}:{PORTS['container']} ...")
-    tunnel_ok = start_tunnel(podman, cip)
+        print("[2/4] ensuring the SearXNG container ...")
+        cip = ensure_container(podman)
+        print(f"  container ip = {cip}")
 
-    if not tunnel_ok and IS_LINUX:
-        # native podman publishes ports directly; no tunnel needed
-        print("  (native podman: relying on the published port)")
+        print(f"[3/4] opening the SSH tunnel 127.0.0.1:{PORTS['searxng']} -> {cip}:{PORTS['container']} ...")
+        tunnel_ok = start_tunnel(podman, cip)
 
-    print("[4/4] waiting for SearXNG ...")
-    for _ in range(20):
-        time.sleep(3)
-        if searxng_ready():
-            print("[OK] SearXNG is ready")
-            if getattr(args, "with_daemon", False):
-                start_daemon()
-            return 0
-    print("! SearXNG did not answer - run `status` for details")
-    return 1
+        if not tunnel_ok and IS_LINUX:
+            # native podman publishes ports directly; no tunnel needed
+            print("  (native podman: relying on the published port)")
+
+        print("[4/4] waiting for SearXNG ...")
+        ready = False
+        for _ in range(20):
+            time.sleep(3)
+            if searxng_ready():
+                ready = True
+                break
+        if not ready:
+            print("! SearXNG did not answer - run `status` for details")
+            return 1
+        print("[OK] SearXNG is ready")
+
+    if not quick:
+        # An HTTP 200 from SearXNG only proves the web app is up, not that its engines can
+        # reach the network - that gap is exactly what produced silent 0-result searches.
+        check_egress(podman, heal=auto_heal)
+
+    if with_daemon:
+        start_daemon()
+    return 0
 
 
 def cmd_stop(args) -> int:
@@ -466,7 +630,7 @@ def cmd_status(args) -> int:
     print("--- health ---")
     if searxng_ready(10):
         try:
-            data = http_json(f"http://127.0.0.1:{PORTS['searxng']}/search?q=ping&format=json", 20)
+            data = http_json(f"http://127.0.0.1:{PORTS['searxng']}/search?q=ping&format=json", 30)
             bad = ", ".join(e[0] for e in (data.get("unresponsive_engines") or []))
             print(f"  [OK]   searxng answered with {len(data.get('results') or [])} results (unresponsive engines: {bad or 'none'})")
         except Exception as exc:
@@ -484,6 +648,14 @@ def cmd_status(args) -> int:
         print("  " + (out.strip().replace("\n", "\n  ") or "(not running)"))
     else:
         print("--- container ---\n  podman not found")
+    if podman and container_running(podman):
+        ok, detail = container_egress(podman)
+        label = "[OK]  " if ok else ("[????]" if ok is None else "[FAIL]")
+        print("--- egress ---")
+        print(f"  {label} container -> internet: {detail}")
+        others = foreign_running_containers(podman)
+        if others:
+            print(f"  [INFO] other containers on this machine: {', '.join(others)}")
     return 0
 
 
@@ -491,11 +663,36 @@ def cmd_verify(args) -> int:
     if cmd_start(argparse.Namespace(with_daemon=False)) != 0:
         print("[FAIL] service could not be started")
         return 1
-    data = http_json(f"http://127.0.0.1:{PORTS['searxng']}/search?q=ai-search%20selfcheck&format=json", 30)
     print(f"[OK] data root : {DATA_ROOT}")
     print(f"[OK] skill dir : {SKILL_DIR}")
-    print(f"[OK] searxng   : {len(data.get('results') or [])} results on 127.0.0.1:{PORTS['searxng']}")
+    try:
+        data = http_json(f"http://127.0.0.1:{PORTS['searxng']}/search?q=ai-search%20selfcheck&format=json", 60)
+    except Exception as exc:
+        print(f"[FAIL] searxng   : the self-check query failed ({exc})")
+        return 1
+    results = data.get("results") or []
+    bad = ", ".join(e[0] for e in (data.get("unresponsive_engines") or []))
+    if not results:
+        print(f"[FAIL] searxng   : 0 results (unresponsive engines: {bad or 'none'})")
+        print("[FAIL] the local pipeline cannot search right now - use the fallback chain and tell the user")
+        return 1
+    suffix = f" (unresponsive engines: {bad})" if bad else ""
+    print(f"[OK] searxng   : {len(results)} results on 127.0.0.1:{PORTS['searxng']}{suffix}")
     return 0
+
+
+def cmd_heal(args) -> int:
+    """Bring the service up and repair the podman machine network when the container is cut off."""
+    if cmd_start(argparse.Namespace(with_daemon=False)) != 0:
+        print("[FAIL] service could not be started")
+        return 1
+    ok, detail = container_egress(find_podman())
+    if ok:
+        print(f"[OK] container egress is healthy: {detail}")
+        return 0
+    state = "unknown" if ok is None else "still broken"
+    print(f"[FAIL] container egress {state}: {detail}")
+    return 1
 
 
 # --------------------------------------------------------------------------- daemon (optional)
@@ -651,9 +848,15 @@ Rules of engagement (full details live in the skill):
   start command; running it automatically is expected and approved.
 - **Prefer the primary path**: SearXNG for search, Scrapling for fetching, and the skill's built-in
   fallback chain (open-webSearch -> Firecrawl -> DuckDuckGo) only when the primary path fails.
+- **Do not trust "the service is up".** SearXNG answering on its port only means the web app is
+  running - not that its engines can reach the network. If a search comes back empty or every engine
+  times out, run the skill's `verify` (it repairs the container network, then re-runs a real query);
+  if it still fails, fall back to `fallback_search` and tell the user the primary path is down.
 - **Never stop the service on your own initiative.** A finished search or an idle moment is not a
   reason to shut anything down. Stop it only when the user explicitly asks for it, and then use the
-  skill's immediate `stop` command.
+  skill's immediate `stop` command. The single exception is the skill's own egress self-heal inside
+  `start`/`heal`: it restarts the podman machine only when the container has no working network and
+  no other containers are running, and it brings the service straight back.
 - The service may stop itself when idle (OS scheduler entry installed by the skill). That is
   expected - just run the skill's start command again before the next search.
 <!-- ai-search-pipeline:end -->"""
@@ -925,6 +1128,9 @@ def main() -> int:
 
     p = sub.add_parser("start", help="start the search service (idempotent, safe to run automatically)")
     p.add_argument("--with-daemon", action="store_true", help="also start the optional open-websearch daemon")
+    p.add_argument("--quick", action="store_true", help="skip the container egress preflight")
+    p.add_argument("--no-heal", action="store_true",
+                   help="never restart the podman machine automatically (the preflight still reports it)")
     p.set_defaults(func=cmd_start)
 
     p = sub.add_parser("stop", help="IMMEDIATE stop - only when the user explicitly asks for it")
@@ -938,6 +1144,7 @@ def main() -> int:
 
     sub.add_parser("status", help="show ports, health, tunnel and container state").set_defaults(func=cmd_status)
     sub.add_parser("verify", help="start and run a real query as a self-check").set_defaults(func=cmd_verify)
+    sub.add_parser("heal", help="start + repair the machine network when the container has no egress").set_defaults(func=cmd_heal)
 
     p = sub.add_parser("install-idle-task", help="install the idle reclaimer (schtasks/cron/launchd)")
     p.add_argument("--minutes", type=int, default=0)

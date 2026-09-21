@@ -23,6 +23,7 @@ Cross-platform (Windows / macOS / Linux). Everything is driven by one standard-l
 2. **Immediate shutdown is user-only.** Run `stop` (or `stop --all`) **only when the user explicitly asks to stop the search service right now**, e.g. "stop the search service", "shut it down", "kill searxng", "stop podman". Never run it on your own initiative - not after a search, not when idle, not "to be tidy".
 3. **Idle reclaiming is machine-managed.** An OS scheduler entry runs `idle-check` (every 15 minutes by default) and only stops the service after it has been idle past the threshold. Do not call `idle-check` yourself and do not work around it.
 4. **Prefer the primary path**: `searxng` for search, `scrapling` for fetching. Switch to `fallback_search` only when the primary path errors, times out, returns nothing or is rate limited.
+5. **SearXNG answering on its port does not mean it can search.** The engines run *inside* the container and need their own DNS and route; the web app happily answers while they all time out. `start` therefore probes egress from inside the container and, when it is broken, restarts the podman machine once (only if no other containers are running) and rebuilds the tunnel. If it prints `[DEGRADED]`, do not keep hammering SearXNG - go straight to `fallback_search` and say the primary path is down. Use `--quick` to skip the probe and `--no-heal` to forbid the restart.
 
 ## Locating this skill (never hardcode a path)
 
@@ -39,11 +40,13 @@ Below, `<skill>` means that resolved directory.
 
 ```bash
 # 1. Start (idempotent, safe to run automatically before any web work)
-python "<skill>/scripts/ai_search.py" start            # add --with-daemon for many open-webSearch calls
+python "<skill>/scripts/ai_search.py" start            # --with-daemon: also run the open-webSearch daemon
+                                                       # --quick: skip the egress probe, --no-heal: never restart the VM
 
 # 2. Health
 python "<skill>/scripts/ai_search.py" status           # ports, SearXNG health, tunnel pid, container
 python "<skill>/scripts/ai_search.py" verify           # start + one real query, prints the result count
+python "<skill>/scripts/ai_search.py" heal             # start + repair the container network if the engines cannot reach out
 
 # 3. Immediate stop - ONLY on an explicit user request
 python "<skill>/scripts/ai_search.py" stop             # stop tunnel + container
@@ -76,7 +79,8 @@ If the sandbox blocks running the script, request approval - this pipeline is us
 |---|---|
 | `searxng` MCP returns connection errors | `start`, then `status`. The tunnel or container is down. |
 | Podman machine stopped | `start` handles it; a cold start takes 20-40 s. |
-| Zero search results | Some upstream engines may be blocked on this network; use `fallback_search` and say so. |
+| Zero search results, or every engine it tried is listed as unresponsive | The container most likely lost its outbound network (typical cause: the WSL VM was suspended and resumed). Run `verify` - it repairs the machine and then runs a real query. If it still reports 0 results, check `status` -> `--- egress ---`, then use `fallback_search` and tell the user the primary path is down. |
+| `start` printed `[DEGRADED]`, or `status` shows `[FAIL]` on the egress line | SearXNG is up but its engines cannot reach the network. Do not retry SearXNG: go straight to `fallback_search` and say the primary path is down. |
 | Stale results | Pass `time_range`, or use a more specific query. |
 | Everything fails | Fall back to your built-in web tools and tell the user the local pipeline is down. |
 | Moved/renamed the folder | `repair`, then restart the agent. |
