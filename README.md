@@ -157,18 +157,37 @@ python skills/ai-search/scripts/ai_search.py heal                    # 容器出
 - Windows 必须依赖 SSH 隧道（WSL 端口发布限制），因此需要 OpenSSH 客户端。
 - podman machine 的 user-mode networking（usernet）在宿主休眠/恢复后可能掉线，表现为容器无 DNS/无路由、所有引擎超时、检索 0 结果；`start`/`heal` 会自检并自愈（若该机器上还有其他容器在运行，则只报告不重启）。
 
-## 第三方组件
+## 第三方组件与许可
 
-| 组件 | 来源 | 许可 |
-|---|---|---|
-| SearXNG | `searxng/searxng`（容器镜像） | AGPL-3.0 |
-| Scrapling | `D4Vinci/Scrapling` | BSD-3-Clause |
-| open-webSearch | `Aas-ee/open-webSearch` | Apache-2.0 |
-| mcp-searxng | `ihor-sokoliuk/mcp-searxng` | MIT |
-| Firecrawl keyless | `mcp.firecrawl.dev`（远程服务） | 商业服务，免费限流 |
+本仓库**不分发**任何第三方代码：所有第三方组件都在 `bootstrap` 时从上游安装，或作为官方容器镜像在运行时拉取。
+完整清单、许可证与义务说明见 **[THIRD_PARTY.md](./THIRD_PARTY.md)**。
+
+| 组件 | 用途 | 许可 | 获取方式 |
+|---|---|---|---|
+| SearXNG | 搜索后端（元搜索） | **AGPL-3.0** | 官方容器镜像（运行时拉取；本仓库只提供配置） |
+| Scrapling | 页面抓取（MCP） | BSD-3-Clause | `pip install "scrapling[ai]"` |
+| open-webSearch | 兜底链第 1 级 | Apache-2.0 | `git clone` + npm build |
+| mcp-searxng | 搜索 MCP 服务 | MIT | `npm install` |
+| **ddgs** | **兜底链第 3 级（DuckDuckGo 库）** | **MIT** | pip 依赖 |
+| mcp（Python SDK） | 兜底网关的 MCP 运行时 | MIT | pip 依赖 |
+| httpx | 兜底网关的 HTTP 客户端 | BSD-3-Clause | pip 依赖 |
+| duckduckgo-mcp-server（可选） | 额外的 DuckDuckGo MCP | MIT | `uvx` 运行时 |
+| Firecrawl keyless | 兜底链第 2 级（托管服务） | 商业服务条款 | 远程 MCP 端点 |
+| Podman / Podman Desktop | 容器运行时（前置） | Apache-2.0 | 外部安装 |
+| WSL2 | Windows 容器后端（前置） | Microsoft EULA | 外部安装 |
+| Node.js / Python / uv | 运行时（前置） | MIT / PSF-2.0 / Apache-2.0 | 外部安装 |
+
+> ⚠️ 区分**库的许可证**与**服务的条款**：`ddgs` 是 MIT，但不代表可以随意抓取 DuckDuckGo 服务；Firecrawl 的托管端点同样受其自身条款约束。请保持请求频率克制并遵守各服务条款。
 
 ## 后台运行行为（无黑框）
 
 - 空闲回收计划任务使用 **`pythonw.exe`** 启动，且脚本内**所有子进程**（`podman` / `netstat` / `taskkill` 等）都以
   `CREATE_NO_WINDOW` + `SW_HIDE` 方式创建 → 定时触发时**不会弹出控制台窗口，也不会抢焦点**。
 - 若你手动重装任务（`install-idle-task`），脚本会自动挑选 `pythonw`；只有在找不到 `pythonw` 时才退回 `python`（此时会有窗口提示，属预期）。
+
+## 许可证
+
+- 本仓库自有代码（`skills/ai-search/`、`fallback-search/`、`searxng/core-config/` 与文档）采用 **Apache-2.0**，见 [LICENSE](./LICENSE) 与 [NOTICE](./NOTICE)。
+- 第三方组件保留各自许可证，本仓库**不重新分发**它们；完整清单见 [THIRD_PARTY.md](./THIRD_PARTY.md)。
+- **关于 SearXNG（AGPL-3.0）**：本仓库不包含、不修改其源码，仅在运行时拉取官方镜像并通过其 HTTP/JSON API 调用，另附一份配置文件（配置数据不构成衍生作品）→ AGPL 的传染性**不适用于本仓库代码**。
+  但若你**修改** SearXNG、或**再分发**其镜像/修改版，就需要自行满足 AGPL-3.0（包括 §13 面向网络用户提供源码的义务）。

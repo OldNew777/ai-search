@@ -1,0 +1,8 @@
+AI-Search Pipeline
+Copyright 2026 OldNew777
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It bundles NO third-party source code. Third-party components are fetched from their upstream
+projects at install time (`bootstrap`) or pulled as official container images at run time.
+See THIRD_PARTY.md for the full inventory, their licenses and the obligations that come with them.
