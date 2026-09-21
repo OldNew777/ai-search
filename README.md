@@ -1,115 +1,45 @@
-# AI-Search Pipeline（Codex 自建检索与抓取）
+# AI-Search Pipeline
 
-> 目录：`E:\Softwares\AI-search`　设计文档：[`Pipeline-design.md`](./Pipeline-design.md)
-> 建立时间：2026-09-20
+自托管的**联网搜索 + 网页抓取**管线，为 **Codex** 与 **Claude Code** 提供实时检索能力。
+全部生命周期由一个标准库 Python 文件管理：`skills/ai-search/scripts/ai_search.py`（跨平台，无第三方依赖）。
 
-## 组成
+| 角色 | 组件 | 说明 |
+|---|---|---|
+| 搜索（主） | **SearXNG**（Podman 容器自建） | 隐私、免费、无需 API key；开启 JSON API 供 MCP 调用 |
+| 抓取（主） | **Scrapling** MCP | 本机 Chromium；静态页 / JS 渲染 / 反爬站点 |
+| 兜底（按序） | **fallback-search** MCP 网关 | open-webSearch → Firecrawl (keyless) → DuckDuckGo |
+| Agent 集成 | skill `ai-search` | 同时链接到 `~/.codex/skills` 与 `~/.claude/skills` |
 
-| 组件 | 角色 | 端口 | 状态 |
-|---|---|---|---|
-| SearXNG (Docker) | 搜索后端（元搜索，聚合上游引擎） | 127.0.0.1:47311 | ⏳ 待 Docker 引擎可用 |
-| mcp-searxng | 搜索主链路 MCP（Codex 直连） | stdio | ✅ 已注册（依赖上面的 SearXNG） |
-| Scrapling MCP | 抓取主链路（静态/JS/反爬，本机 Chromium） | stdio | ✅ 已验证可用 |
-| open-webSearch | 兜底链第 1 级（本地 daemon + MCP） | 127.0.0.1:47313 | ✅ 已验证可用 |
-| Firecrawl (keyless) | 兜底链第 2 级 | 远程 MCP | ✅ 已验证可用 |
-| DuckDuckGo MCP | 兜底链第 3 级 | stdio | ✅ 已注册（网关内也用 ddgs 实现同级兜底） |
-| fallback-search | 自建降级网关（确定性按序 fallback） | stdio | ✅ 三级降级已实测 |
+仓库：<https://github.com/OldNew777/ai-search>
 
-## 常用命令
+---
 
-```powershell
-# 启停与状态
-& E:\Softwares\AI-search\scripts\start-all.ps1
-& E:\Softwares\AI-search\scripts\status.ps1
-& E:\Softwares\AI-search\scripts\stop-all.ps1
+## 架构
 
-# MCP 探针（列出工具 / 调用某个工具）
-$py = "E:\Softwares\AI-search\fallback-search\.venv\Scripts\python.exe"
-& $py E:\Softwares\AI-search\mcp-probe\probe-stdio.py `
-    E:\Softwares\AI-search\fallback-search\.venv\Scripts\fallback-search.exe `
-    -- web_search '{"query":"test","max_results":3}'
-
-# Codex 看到的 MCP 列表
-codex mcp list
+```
+Codex / Claude Code
+  │
+  ├─ searxng MCP ─────────► http://127.0.0.1:47311 ──┐
+  │                                                  │ SSH 隧道（Windows/macOS 需要）
+  ├─ scrapling MCP ───────► 本机 Chromium           │
+  │                                                  ▼
+  └─ fallback_search MCP ─► podman machine (WSL/VM) ─► SearXNG 容器 10.88.x.x:8080
+       open-webSearch → Firecrawl → DuckDuckGo
 ```
 
-## Codex 配置
+- SearXNG 容器运行在 **podman machine**（Windows 用 WSL2 后端）里；
+- Windows 下容器端口发布**无法**直接映射到宿主 `127.0.0.1`，因此由 `ai_search.py` 建立 **SSH 隧道**（`127.0.0.1:47311 → 容器IP:8080`），容器 IP 每次动态解析；
+- Linux 原生 Podman 无需隧道，脚本会自动直接使用发布端口。
 
-- 全局配置：`C:\Users\chenxin47\.codex\config.toml`（新增 6 个 `[mcp_servers.*]`）
-- 全局指令：`C:\Users\chenxin47\.codex\AGENTS.md`（新增“Web 检索与抓取优先级”章节）
-- 备份：`E:\Softwares\AI-search\_backup\20260920-203117\`（`codex-config.toml` / `codex-AGENTS.md`，含 SHA256 校验）
-- 就地备份：`config.toml.before-ai-search`、`AGENTS.md.before-ai-search`
-- 回滚：`& E:\Softwares\AI-search\scripts\rollback.ps1`
+---
 
-> 工具审批：本方案**未**修改 Codex 默认审批策略。交互会话中首次调用某个 MCP 工具时会弹审批；若希望自动放行，请自行在对应服务器下添加
-> `default_tools_approval_mode = "approve"`（注意：这会永久关闭该类工具的审批门，请自行评估风险）。
+## 快速开始（新机器）
 
-## 已知限制
+前置条件：
 
-1. **Docker 引擎未就绪**：本机未启用 Windows「Virtual Machine Platform / WSL2」，Docker Desktop 4.91 的 Linux 引擎无法启动（日志：`checking preconditions: Virtual Machine Platform not enabled`）。因此 SearXNG 容器与 mcp-searxng 的实际检索暂不可用；启用并重启后执行 `scripts\start-all.ps1` 即可。
-2. 公开 SearXNG 实例在本机网络下全部不可达（已实测），所以本地自建是唯一可行路径。
-3. Firecrawl keyless 按 IP 限流、DuckDuckGo 偶发风控 —— 这正是需要多级降级的原因。
-4. 全局 `config.toml` 中既有的 `node_repl` / `renderdoc` / `renderdoc-mcp` 在 Codex 启动时报错（路径失效/握手失败），属既有问题，本方案未改动。
-
-## 更新（2026-09-20 晚）
-
-- 容器运行时由 Docker Desktop 改为 **Podman**（Docker Desktop 商用需付费；Podman 为 Apache-2.0 无限制）。
-- SearXNG 改为**单容器**（去掉 valkey）；启动方式：`scripts\ensure-services.ps1`（按需），停止：`scripts\idle-stop.ps1`。
-- open-webSearch daemon 变为**可选**：网关自动在 daemon 与一次性 CLI 之间切换；Codex 中该 MCP 固定 `MODE = "stdio"`（不占 3000 端口）。
-- 仍需一次性操作：启用 Windows「虚拟机平台」/ WSL 或 Hyper-V 并**重启**，否则 Podman machine 无法运行。
-
-## 最终使用方式（2026-09-20 深夜更新）
-
-```powershell
-# 开始用检索前（幂等，约 10-40 秒）
-& E:\Softwares\AI-search\scripts\ensure-services.ps1
-
-# 查看状态
-& E:\Softwares\AI-search\scripts\status.ps1
-
-# 用完回收（停容器+隧道；加 -StopMachine 连虚拟机一起停，释放 ~2GB）
-& E:\Softwares\AI-search\scripts\idle-stop.ps1 -IdleMinutes 30 [-StopMachine]
-```
-
-**架构**：Windows `127.0.0.1:47311` ←SSH 隧道← podman machine 内的容器 `10.88.x.x:8080`（SearXNG）。
-> WSL 的容器端口发布在 Windows 侧不可达（已实测多种组合），因此用 SSH 隧道直连容器 IP；隧道由脚本按容器生命周期管理（11 MB 内存）。
-
-**实测开销**：容器 122 MB / VM 常驻约 1.9 GB / 隧道 11 MB / 磁盘 3.25 GB(C:) + 479 MB(E:)。
-
-## 自动化与迁移（2026-09-20 22:20 更新）
-
-- **自动回收**：已注册计划任务 `AI-Search Idle Stop`，每 15 分钟运行一次 `scripts\idle-stop.ps1`（空闲 15 分钟则停隧道+容器）。查看：`Get-ScheduledTaskInfo -TaskName 'AI-Search Idle Stop'`。
-- **搬迁**：整个目录移到任意位置后运行 `scripts\repair-after-move.ps1`（重装网关 + 重写 Codex 配置 + 重建任务），再重启 Codex。
-- **配置集中**：端口/容器名/空闲阈值/相对路径都在 `config/settings.psd1`，脚本不再硬编码路径。
-- **编码约定**：`.ps1` 用 UTF-8 **带 BOM**（兼容 PowerShell 5.1 计划任务）；`config.toml`/`AGENTS.md` 用 UTF-8 **不带 BOM**。
-
-## 作为 Skill 使用（推荐）
-
-本管线已封装为技能 `ai-search`，并链接到两个平台：
-
-- Codex：`~/.codex/skills/ai-search`（junction）
-- Claude Code：`~/.claude/skills/ai-search`（junction）
-- 真身：`<data-root>\skills\ai-search\`（SKILL.md + scripts\ + config\）
-
-**AI 的行为约定**（见 SKILL.md）：需要联网时**自动启动**搜索服务；**只在用户明确要求时**才停止服务，绝不自行静默关闭。
-
-手工调用：
-
-```powershell
-# 启动（幂等）
-& "<data-root>\skills\ai-search\scripts\ensure-services.ps1"
-# 状态 / 自检
-& "<data-root>\skills\ai-search\scripts\status.ps1"
-& "<data-root>\skills\ai-search\scripts\verify.ps1"
-# 停止（仅在明确需要时）
-& "<data-root>\skills\ai-search\scripts\stop-all.ps1"
-```
-
-维护：`repair-after-move.ps1`（迁移后）、`sync-codex-config.ps1`（重写 config.toml/AGENTS.md/CLAUDE.md）、`register-idle-task.ps1 -Minutes 30`（改回收间隔）。
-
-## Fresh machine setup (one command)
-
-Prerequisites: **Podman Desktop** with a running podman machine, **Node.js + npm**, **Python 3.10+**, **Git** (Windows also needs the built-in OpenSSH client).
+- **Podman Desktop**（含一个已创建的 podman machine；Windows 需先启用 WSL2 或 Hyper-V）
+- **Node.js + npm**、**Python 3.10+**、**Git**
+- Windows 另需系统自带的 **OpenSSH 客户端**
 
 ```bash
 git clone https://github.com/OldNew777/ai-search.git
@@ -117,19 +47,118 @@ cd ai-search
 python skills/ai-search/scripts/ai_search.py bootstrap
 ```
 
-`bootstrap` performs, idempotently:
+`bootstrap` 幂等地完成：
 
-1. creates the Python venvs (Scrapling + the fallback gateway) and downloads the Chromium runtime;
-2. clones and builds `open-websearch`, installs `mcp-searxng`;
-3. generates `.env` with a random `SEARXNG_SECRET`;
-4. links the skill into `~/.codex/skills/ai-search` and `~/.claude/skills/ai-search`;
-5. writes the Codex MCP servers into `~/.codex/config.toml` and the guidance block into
-   `~/.codex/AGENTS.md` + `~/.claude/CLAUDE.md`;
-6. installs the idle scheduler entry (schtasks / cron / launchd);
-7. starts the pipeline and runs a real query to verify it.
+1. 创建 Python 虚拟环境并安装 **Scrapling**（含 Chromium 运行时）；
+2. 安装 **fallback-search** 网关（editable）；
+3. 克隆并构建 **open-webSearch**、安装 **mcp-searxng**；
+4. 生成 `.env`（随机 `SEARXNG_SECRET`）；
+5. 把技能链接到 `~/.codex/skills/ai-search` 与 `~/.claude/skills/ai-search`；
+6. 写入 Codex 的 MCP 配置（`~/.codex/config.toml`）与两个平台的引导块（`~/.codex/AGENTS.md`、`~/.claude/CLAUDE.md`）；
+7. 安装空闲回收的计划任务（Windows `schtasks` / macOS `launchd` / Linux `cron`）；
+8. 启动服务并执行一次真实检索自检。
 
-Then restart the agent so the new skill and MCP servers are loaded. Day-to-day you never need these
-commands by hand - the `ai-search` skill tells the agent when to start the service, and immediate
-shutdown happens only when you explicitly ask for it.
+完成后**重启 Agent**以加载新技能与 MCP。
 
-Moving the checkout later is safe: run `python skills/ai-search/scripts/ai_search.py repair`.
+---
+
+## 日常使用
+
+正常情况下**不需要手动操作**：Agent 在需要联网时会按技能说明自动 `start`；只有当你**明确要求**时才会 `stop`。
+
+```bash
+python skills/ai-search/scripts/ai_search.py start     # 启动（幂等，可自动调用）
+python skills/ai-search/scripts/ai_search.py status    # 端口 / 健康 / 隧道 / 容器
+python skills/ai-search/scripts/ai_search.py verify    # 启动 + 真实检索自检
+python skills/ai-search/scripts/ai_search.py stop      # 立即停止（仅限用户明确要求；加 --all 连 VM 一起停）
+```
+
+### 停止语义（重要）
+
+| 动作 | 命令 | 触发条件 |
+|---|---|---|
+| **立即停止**（同步，不判断空闲） | `stop [--all]` | **仅当用户明文要求**（"关闭搜索服务"等）；模型不得自行调用 |
+| **空闲回收**（先判断空闲时长） | `idle-check --minutes N` | 仅由 OS 计划任务调用，默认每 15 分钟一次；模型不得调用 |
+
+---
+
+## 目录结构
+
+```
+<data-root>/
+├─ skills/ai-search/          # 技能本体（skill links 指向这里）
+│  ├─ SKILL.md                #   Agent 使用说明（英文）
+│  ├─ config/settings.json    #   端口 / 容器 / 空闲阈值 / 相对路径
+│  └─ scripts/ai_search.py    #   唯一入口（标准库，跨平台）
+├─ searxng/
+│  ├─ docker-compose.yml      #   （可选）podman/docker compose 方式
+│  └─ core-config/            #   settings.yml（开启 JSON API）、limiter.toml
+├─ fallback-search/           # 自建降级网关（MCP, stdio）
+├─ scrapling/.venv/           # Scrapling + Chromium（bootstrap 生成）
+├─ open-websearch/  mcp-searxng/   # 第三方件（bootstrap 还原，不入库）
+├─ mcp-probe/probe-stdio.py   # 通用 MCP stdio 探针
+├─ logs/  _backup/  .env      # 运行日志 / 配置备份 / 密钥（均不入库）
+├─ README.md
+└─ Pipeline-design.md
+```
+
+---
+
+## 配置
+
+`skills/ai-search/config/settings.json`：
+
+```json
+{
+  "ports":     { "searxng": 47311, "daemon": 47313, "container": 8080 },
+  "container": { "name": "ai-search-searxng", "image": "docker.io/searxng/searxng:latest" },
+  "idle":      { "minutes": 15 },
+  "paths":     { "...": "全部为相对 data-root 的路径" }
+}
+```
+
+脚本**不含任何硬编码绝对路径**：技能目录由脚本自身位置推导，数据根目录为其上两级；也可用环境变量 `AI_SEARCH_ROOT` 覆盖。
+
+---
+
+## 维护命令
+
+```bash
+python skills/ai-search/scripts/ai_search.py repair                 # 搬迁/重命名目录后：重装、重链、重同步
+python skills/ai-search/scripts/ai_search.py sync-agent-config      # 重写 config.toml + AGENTS.md + CLAUDE.md
+python skills/ai-search/scripts/ai_search.py link-skill             # 重建 Codex/Claude 技能链接
+python skills/ai-search/scripts/ai_search.py install-idle-task --minutes 30
+python skills/ai-search/scripts/ai_search.py uninstall-idle-task    # 完全手动停止（禁用空闲回收）
+python skills/ai-search/scripts/ai_search.py rollback               # 还原最近一次备份的 Agent 配置
+```
+
+---
+
+## 故障排查
+
+| 现象 | 处理 |
+|---|---|
+| `searxng` MCP 连接失败 | `start` 然后 `status`（隧道或容器未运行） |
+| podman machine 未启动 | `start` 会自动拉起；冷启动约 20–40 秒 |
+| 检索 0 结果 | 部分上游引擎在本网络不可达；改用 `fallback_search` 并说明降级 |
+| 结果偏旧 | 检索时传 `time_range`（`day`/`week`/…）或换更精确的查询 |
+| 迁移目录后失效 | `repair`，然后重启 Agent |
+| 想看接口是否活着 | `python skills/ai-search/scripts/ai_search.py verify` |
+
+---
+
+## 已知限制
+
+- 当前网络下 `duckduckgo`、`wikidata` 两个上游引擎不响应（其余引擎正常，不影响检索）。
+- Podman machine 常驻约占 2 GB 内存；空闲回收任务（或 `stop --all`）可释放。
+- Windows 必须依赖 SSH 隧道（WSL 端口发布限制），因此需要 OpenSSH 客户端。
+
+## 第三方组件
+
+| 组件 | 来源 | 许可 |
+|---|---|---|
+| SearXNG | `searxng/searxng`（容器镜像） | AGPL-3.0 |
+| Scrapling | `D4Vinci/Scrapling` | BSD-3-Clause |
+| open-webSearch | `Aas-ee/open-webSearch` | Apache-2.0 |
+| mcp-searxng | `ihor-sokoliuk/mcp-searxng` | MIT |
+| Firecrawl keyless | `mcp.firecrawl.dev`（远程服务） | 商业服务，免费限流 |
