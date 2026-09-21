@@ -166,3 +166,9 @@ python skills/ai-search/scripts/ai_search.py heal                    # 容器出
 | open-webSearch | `Aas-ee/open-webSearch` | Apache-2.0 |
 | mcp-searxng | `ihor-sokoliuk/mcp-searxng` | MIT |
 | Firecrawl keyless | `mcp.firecrawl.dev`（远程服务） | 商业服务，免费限流 |
+
+## 后台运行行为（无黑框）
+
+- 空闲回收计划任务使用 **`pythonw.exe`** 启动，且脚本内**所有子进程**（`podman` / `netstat` / `taskkill` 等）都以
+  `CREATE_NO_WINDOW` + `SW_HIDE` 方式创建 → 定时触发时**不会弹出控制台窗口，也不会抢焦点**。
+- 若你手动重装任务（`install-idle-task`），脚本会自动挑选 `pythonw`；只有在找不到 `pythonw` 时才退回 `python`（此时会有窗口提示，属预期）。

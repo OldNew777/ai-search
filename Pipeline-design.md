@@ -268,3 +268,38 @@ python skills/ai-search/scripts/ai_search.py rollback         # 还原最近备�
 2. 调整空闲回收阈值为 30 分钟，或对高内存场景使用 `stop --all` 释放 VM；
 3. 为 SearXNG 增加 HTTP 代理以启用 Google/DDG 等引擎；
 4. 把 `mcp-probe/probe-stdio.py` 扩展为回归测试脚本，纳入 CI。
+
+---
+
+## 16. 后台静默运行（无控制台闪窗 / 不抢焦点）
+
+**问题**：OS 计划任务若用 `pythonw.exe` 启动，进程本身没有控制台；此时它再启动 `podman` / `netstat` / `taskkill` 等 **console 子系统**程序，Windows 会为每个子进程**新建一个控制台窗口** —— 表现为黑色窗口一闪一闪（或停留）并**抢走当前窗口焦点**。
+
+**修复**（`ai_search.py`）：
+
+- 新增统一常量：
+
+  ```python
+  _NO_WINDOW = subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0
+  _STARTUPINFO = None
+  if IS_WINDOWS:
+      _STARTUPINFO = subprocess.STARTUPINFO()
+      _STARTUPINFO.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+      _STARTUPINFO.wShowWindow = subprocess.SW_HIDE
+  ```
+
+- **所有** `subprocess.run(...)`（`run()` 辅助函数、crontab 调用）都带上
+  `creationflags=_NO_WINDOW, startupinfo=_STARTUPINFO`；
+- 后台常驻的 `Popen`（SSH 隧道、open-webSearch daemon）保持
+  `_NO_WINDOW | DETACHED_PROCESS` + `startupinfo=_STARTUPINFO`；
+- 计划任务动作固定为 `pythonw.exe <skill>/scripts/ai_search.py idle-check`（`find_pythonw()` 自动选择，找不到才退回 `python.exe`）。
+
+**实测**（可见窗口差异法：`MainWindowHandle != 0` 的进程集合做前后差集）：
+
+| 场景 | 新增可见窗口 |
+|---|---|
+| `pythonw ai_search.py status`（会 spawn podman/netstat） | **0** |
+| `pythonw ai_search.py idle-check` | **0** |
+| `pythonw ai_search.py stop`（tunnel `taskkill` + `podman stop`） | **0** |
+
+即：定时回收、手动启停都不再出现黑框，也不会打断前台窗口的焦点。

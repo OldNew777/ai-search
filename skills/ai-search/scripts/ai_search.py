@@ -45,6 +45,15 @@ from pathlib import Path
 IS_WINDOWS = os.name == "nt"
 IS_MACOS = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
+# Every child process must stay invisible: when this script runs under pythonw.exe (the OS
+# scheduler entry) there is no console, so Windows would otherwise allocate a NEW console
+# window for each console child (podman/netstat/taskkill/...) - that flash also steals focus.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0
+_STARTUPINFO = None
+if IS_WINDOWS:
+    _STARTUPINFO = subprocess.STARTUPINFO()
+    _STARTUPINFO.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    _STARTUPINFO.wShowWindow = subprocess.SW_HIDE
 
 SKILL_DIR = Path(__file__).resolve().parent.parent          # <data-root>/skills/ai-search
 DATA_ROOT = SKILL_DIR.parent.parent                          # <data-root>
@@ -86,6 +95,7 @@ def run(cmd, check=False, cwd=None, timeout=300, env=None, stdin_data=None):
         proc = subprocess.run(
             cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True,
             timeout=timeout, env=env, errors="replace", input=stdin_data,
+            creationflags=_NO_WINDOW, startupinfo=_STARTUPINFO,
         )
     except FileNotFoundError as exc:
         return 127, "", str(exc)
@@ -511,7 +521,8 @@ def start_tunnel(podman: str, cip: str) -> bool:
     stderr = err_log.open("w", encoding="utf-8")
     kwargs = {"stdout": stdout, "stderr": stderr, "stdin": subprocess.DEVNULL}
     if IS_WINDOWS:
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+        kwargs["creationflags"] = _NO_WINDOW | subprocess.DETACHED_PROCESS
+        kwargs["startupinfo"] = _STARTUPINFO
     else:
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(argv, **kwargs)
@@ -719,7 +730,8 @@ def start_daemon() -> None:
     err = (logs / "open-websearch.err.log").open("w", encoding="utf-8")
     kwargs = {"cwd": str(workdir), "stdout": out, "stderr": err, "stdin": subprocess.DEVNULL}
     if IS_WINDOWS:
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+        kwargs["creationflags"] = _NO_WINDOW | subprocess.DETACHED_PROCESS
+        kwargs["startupinfo"] = _STARTUPINFO
     else:
         kwargs["start_new_session"] = True
     subprocess.Popen([node, "build/index.js", "serve", "--port", str(PORTS["daemon"])], **kwargs)
@@ -803,7 +815,8 @@ def install_idle_task(minutes: int) -> int:
         rc, out, _ = run([exe, "-l"], timeout=60)
         lines = [l for l in out.splitlines() if "ai-search.py" not in l and "ai_search.py" not in l]
         lines.append(f"*/{minutes} * * * * {' '.join(cmd)} >> {log_dir()/'idle-check.log'} 2>&1")
-        proc = subprocess.run([exe, "-"], input="\n".join(lines) + "\n", text=True, capture_output=True)
+        proc = subprocess.run([exe, "-"], input="\n".join(lines) + "\n", text=True, capture_output=True,
+                                   creationflags=_NO_WINDOW, startupinfo=_STARTUPINFO)
         if proc.returncode != 0:
             print(f"! crontab update failed: {proc.stderr.strip()}")
             return 1
@@ -827,7 +840,8 @@ def uninstall_idle_task() -> int:
     if exe:
         rc, out, _ = run([exe, "-l"], timeout=60)
         lines = [l for l in out.splitlines() if "ai_search.py" not in l]
-        subprocess.run([exe, "-"], input="\n".join(lines) + "\n", text=True, capture_output=True)
+        subprocess.run([exe, "-"], input="\n".join(lines) + "\n", text=True, capture_output=True,
+                           creationflags=_NO_WINDOW, startupinfo=_STARTUPINFO)
         print("[OK] cron entry removed")
     return 0
 
